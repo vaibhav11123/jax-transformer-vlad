@@ -41,13 +41,18 @@ def generate(model: nnx.Module, a: int, b: int, *, n_digits: int) -> int:
     return int(answer.replace(" ", ""))
 
 
-
 def main(cfg: Config):
     rngs = nnx.Rngs(cfg.seed)
     np_rng = np.random.default_rng(cfg.seed)
     model = DigitTransformer(cfg, rngs=rngs)
-    param_count = sum(p.size for p in jax.tree_util.tree_leaves(nnx.state(model, nnx.Param)))
-    print(f"{param_count / 1e6:.4f}M parameters")
+
+    # Chinchilla accounting (Hoffmann et al. 2022): N params, D tokens, C≈6ND
+    N = int(sum(p.size for p in jax.tree_util.tree_leaves(nnx.state(model, nnx.Param))))
+    D = int(cfg.max_iters * cfg.batch_size * cfg.block_size)
+    C = int(6 * N * D)
+    print(f"{N / 1e6:.4f}M parameters")
+    print(f"N={N}  D={D}  C≈6ND={C}")
+
     optimizer = nnx.Optimizer(model, optax.adamw(cfg.learning_rate), wrt=nnx.Param)
     mask = jnp.array(data.loss_mask(cfg.n_digits, cfg.block_size))
 
@@ -96,19 +101,38 @@ def main(cfg: Config):
                 print(f"  {a}+{b}=? ✗ (true {a + b})  [non-numeric decode]")
         print()
 
+    final_val_loss = None
     for it in range(cfg.max_iters):
         if it % cfg.eval_interval == 0 or it == cfg.max_iters - 1:
             val_loss = estimate_val_loss()
+            final_val_loss = float(val_loss)
             print(f"step {it}: val_loss={val_loss:.4f}")
-            wandb.log({"val_loss": float(val_loss)}, step=it)
+            wandb.log({"val_loss": final_val_loss}, step=it)
             print_sample_generations()
 
         x, y = data.get_batch(np_rng, cfg.n_digits, cfg.batch_size)
         loss = train_step(model, optimizer, jnp.array(x), jnp.array(y))
         wandb.log({"train_loss": float(loss)}, step=it)
 
+    wandb.summary["N"] = N
+    wandb.summary["D"] = D
+    wandb.summary["C"] = C
+    wandb.summary["final_val_loss"] = final_val_loss
     wandb.finish()
-    return model
+
+    # Metrics dict for chinchilla/ sweeps (CSV column n_embed maps to cfg.n_embd)
+    return {
+        "n_embed": cfg.n_embd,
+        "n_layer": cfg.n_layer,
+        "n_head": cfg.n_head,
+        "batch_size": cfg.batch_size,
+        "max_iters": cfg.max_iters,
+        "N": N,
+        "D": D,
+        "C": C,
+        "final_val_loss": final_val_loss,
+        "wandb_run_name": cfg.wandb_run_name,
+    }
 
 
 if __name__ == "__main__":
