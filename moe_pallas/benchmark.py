@@ -1,7 +1,9 @@
 """Smoke-test ragged_dot, check vs reference, time baseline, append CSV."""
 from __future__ import annotations
 
+import argparse
 import csv
+import datetime as _dt
 import time
 from pathlib import Path
 
@@ -11,9 +13,10 @@ import numpy as np
 
 from moe_pallas.ragged_baseline import moe_ragged, ragged_projections
 from moe_pallas.reference import moe_reference
-from moe_pallas.routing import make_routing, sort_tokens
+from moe_pallas.routing import make_routing, restore_token_order, sort_tokens
 
 RESULTS = Path(__file__).resolve().parent / "results" / "baseline.csv"
+PROFILE_ROOT = Path(__file__).resolve().parent / "results"
 
 # Tiny correctness (CPU/TPU). Headline profile: E > D (assignment F > D).
 CORRECT = dict(T=32, E=4, D=8, H=16, dtype=jnp.float32)
@@ -37,6 +40,7 @@ FIELDS = [
     "std_ms",
     "scope",
 ]
+SCOPES = ("full", "proj", "sort")
 
 
 def _device_meta():
@@ -91,14 +95,23 @@ def check_correctness(distribution="balanced"):
 
 
 def _median_ms(fn, warmup=10, repeats=50):
+    # jax.block_until_ready handles pytrees (sort scope returns a tuple).
     for _ in range(warmup):
-        fn().block_until_ready()
+        jax.block_until_ready(fn())
     samples = []
     for _ in range(repeats):
         t0 = time.perf_counter()
-        fn().block_until_ready()
+        jax.block_until_ready(fn())
         samples.append((time.perf_counter() - t0) * 1e3)
     return float(np.median(samples)), float(np.std(samples))
+
+
+def _sort_restore(x, gate, order):
+    # Rearrangement only — no GEMMs. Restores x and gate to original order.
+    x_s, g_s = sort_tokens(x, gate, order)
+    x_back = restore_token_order(x_s, order)
+    g_back = restore_token_order(g_s[:, None], order)[:, 0]
+    return x_back, g_back
 
 
 def time_case(cfg, distribution, scope="full"):
@@ -111,13 +124,17 @@ def time_case(cfg, distribution, scope="full"):
         run = jax.jit(
             lambda: moe_ragged(x, w_up, w_down, gate, order, sizes)
         )
-    else:
+    elif scope == "proj":
         x_s, g_s = sort_tokens(x, gate, order)
         run = jax.jit(
             lambda: ragged_projections(x_s, w_up, w_down, g_s, sizes)
         )
+    elif scope == "sort":
+        run = jax.jit(lambda: _sort_restore(x, gate, order))
+    else:
+        raise ValueError(f"unknown scope: {scope}")
 
-    run().block_until_ready()  # compile + warm up; excluded from median
+    jax.block_until_ready(run())  # compile + warm up; excluded from median
     med, std = _median_ms(run)
     meta = _device_meta()
     return {
@@ -150,13 +167,60 @@ def append_row(row):
         w.writerow({k: row[k] for k in FIELDS})
 
 
-def main():
-    import datetime as _dt
-    run_id = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+def _profile_proj(cfg=HEADLINE, distribution="balanced"):
+    # Best-effort trace for balanced proj; skip cleanly if tooling fails.
+    x, w_up, w_down, gate = make_case(**cfg, seed=3)
+    _, order, sizes = make_routing(
+        cfg["T"], cfg["E"], seed=4, distribution=distribution
+    )
+    x_s, g_s = sort_tokens(x, gate, order)
+    run = jax.jit(
+        lambda: ragged_projections(x_s, w_up, w_down, g_s, sizes)
+    )
+    jax.block_until_ready(run())
+    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_dir = PROFILE_ROOT / f"profile_{stamp}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        with jax.profiler.trace(str(out_dir)):
+            for _ in range(5):
+                jax.block_until_ready(run())
+        print(f"profile wrote → {out_dir}")
+    except Exception as e:
+        print(f"profile skipped: {type(e).__name__}: {e}")
+
+
+def _run_timing_grid(run_id):
+    for dist in ("balanced", "skewed"):
+        for scope in SCOPES:
+            row = time_case(HEADLINE, dist, scope=scope)
+            row["run_id"] = run_id
+            append_row(row)
+            print(
+                f"{dist}/{scope}: median={row['median_ms']:.3f} ms "
+                f"std={row['std_ms']:.3f} E>D={row['E_gt_D']}"
+            )
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--sessions",
+        type=int,
+        default=1,
+        help="repeat the timing grid with a fresh run_id each time",
+    )
+    p.add_argument(
+        "--profile",
+        action="store_true",
+        help="best-effort jax.profiler.trace on balanced proj",
+    )
+    args = p.parse_args(argv)
+
     meta = _device_meta()
     print(
-        f"run_id={run_id} backend={meta['backend']} "
-        f"device={meta['device_kind']} jax={meta['jax_version']}"
+        f"backend={meta['backend']} device={meta['device_kind']} "
+        f"jax={meta['jax_version']} sessions={args.sessions}"
     )
     smoke_ragged_dot()
     print("smoke_ragged_dot: ok")
@@ -168,15 +232,13 @@ def main():
     jax.config.update("jax_default_matmul_precision", "default")
     jax.clear_caches()
 
-    for dist in ("balanced", "skewed"):
-        for scope in ("full", "proj"):
-            row = time_case(HEADLINE, dist, scope=scope)
-            row["run_id"] = run_id
-            append_row(row)
-            print(
-                f"{dist}/{scope}: median={row['median_ms']:.3f} ms "
-                f"std={row['std_ms']:.3f} E>D={row['E_gt_D']}"
-            )
+    if args.profile:
+        _profile_proj()
+
+    for _ in range(max(1, args.sessions)):
+        run_id = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        print(f"run_id={run_id}")
+        _run_timing_grid(run_id)
 
 
 if __name__ == "__main__":
