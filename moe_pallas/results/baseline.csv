@@ -1,0 +1,5 @@
+run_id,impl,token_count,expert_count,model_dim,hidden_dim,E_gt_D,dtype,routing,activation,backend,device_kind,jax_version,median_ms,std_ms,scope
+20261029T091150Z,ragged_dot,8192,256,128,512,1,bfloat16,balanced,relu,tpu,TPU v5 lite,0.11.2,0.4161200000680765,0.010157270534903446,full
+20261029T091150Z,ragged_dot,8192,256,128,512,1,bfloat16,balanced,relu,tpu,TPU v5 lite,0.11.2,0.4182804999572909,0.017538497349016368,proj
+20261029T091150Z,ragged_dot,8192,256,128,512,1,bfloat16,skewed,relu,tpu,TPU v5 lite,0.11.2,0.45409000006202405,0.014782605892493996,full
+20261029T091150Z,ragged_dot,8192,256,128,512,1,bfloat16,skewed,relu,tpu,TPU v5 lite,0.11.2,0.42135500007134397,0.009813840344490113,proj

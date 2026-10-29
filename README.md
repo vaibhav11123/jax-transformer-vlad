@@ -6,6 +6,7 @@ Vlad Feinberg exercises — built from scratch using JAX, Flax NNX, and Optax.
 - **Exercise 2:** Chinchilla scaling empirics in `chinchilla/`  
   Walkthrough: https://youtu.be/ji2_hHj-UI4  
   Report PDF: https://drive.google.com/file/d/1I59jP0TeVZS3I9O9pTMRt_lG1YfIEnZ7/view?usp=sharing
+- **Exercise 3:** MoE `ragged_dot` baseline (+ fused Pallas later) in [`moe_pallas/`](moe_pallas/README.md)
 
 ## What it does
 Trains a ~10M parameter transformer to perform up to 3-digit addition.

@@ -16,3 +16,4 @@ build/
 *.mov
 *.mp4
 Untitled
+.venv/
